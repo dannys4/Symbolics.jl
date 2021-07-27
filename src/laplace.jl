@@ -83,7 +83,7 @@ function expand_laplace(O::Symbolic, simplify=false; occurances=nothing)
                     return expand_laplace(operation(arg)(inner), simplify)
                 end
             end
-        elseif isa(operation(arg), Integral) ## Why even try this one
+#=         elseif isa(operation(arg), Integral) ## Why even try this one
             if isa(operation(arg).domain, AbstractInterval)
                 domain = operation(arg).domain
                 a, b = DomainSets.endpoints(domain)
@@ -102,7 +102,7 @@ function expand_laplace(O::Symbolic, simplify=false; occurances=nothing)
                 inner = expand_derivatives(D(arguments(arg)[1]))
                 c += operation(arg)(inner)
                 return value(c)
-            end
+            end =#
         end
         ## Add a detection for differential!
 
@@ -116,11 +116,11 @@ function expand_laplace(O::Symbolic, simplify=false; occurances=nothing)
             x = if _iszero(t2)
                 t2
             elseif _isone(t2)
-                d = derivative_idx(arg, i)
+                d = laplace_idx(arg, i)
                 d isa NoLaplace ? L(arg) : d
             else
-                t1 = derivative_idx(arg, i)
-                t1 = t1 isa NoDeriv ? D(arg) : t1
+                t1 = laplace_idx(arg, i)
+                t1 = t1 isa NoLaplace ? D(arg) : t1
                 t1 * t2
             end
 
@@ -142,9 +142,9 @@ function expand_laplace(O::Symbolic, simplify=false; occurances=nothing)
             x = +((!_iszero(c) ? vcat(c, exprs) : exprs)...)
             return simplify ? SymbolicUtils.simplify(x) : x
         end
-    elseif istree(O) && isa(operation(O), Integral)
-        return operation(O)(expand_derivatives(arguments(O)[1]))
-    elseif !hasderiv(O)
+#=     elseif istree(O) && isa(operation(O), Integral)
+        return operation(O)(expand_derivatives(arguments(O)[1])) =#
+    elseif !haslaplace(O)
         return O
     else
         args = map(a->expand_derivatives(a, false), arguments(O))
@@ -153,8 +153,8 @@ function expand_laplace(O::Symbolic, simplify=false; occurances=nothing)
     end
 end
 
-function expand_derivatives(n::Num, simplify=false; occurances=nothing)
-    Num(expand_derivatives(value(n), simplify; occurances=occurances))
+function expand_laplace(n::Num, simplify=false; occurances=nothing)
+    Num(expand_laplace(value(n), simplify; occurances=occurances))
 end
 
 laplace(::typeof(one), args::Tuple{<:Any}, ::Val{s}) where {s} = 1/s
