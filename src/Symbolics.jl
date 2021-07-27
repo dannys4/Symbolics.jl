@@ -136,4 +136,6 @@ using Requires
 export symbolics_to_sympy
 include("init.jl")
 
+include("laplace.jl")
+
 end # module
