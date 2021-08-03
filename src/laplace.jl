@@ -44,7 +44,7 @@ function expand_laplace(O::Symbolic, simplify=false; occurances=nothing)
             occurances = occursin_info(operation(O).x, arg)
         end
 
-        _isfalse(occurances) && return arg*inv(operation(O).s)
+        _isfalse(occurances) && return 0
         if occurances isa Bool
          return inv(operation(O).s^2) # means it's a `true`
         end
@@ -114,7 +114,8 @@ function expand_laplace(O::Symbolic, simplify=false; occurances=nothing)
 
         for i in 1:l
             t2 = expand_laplace(L(arguments(arg)[i]),false, occurances=arguments(occurances)[i])
-
+            push!(Main._ts, t2)
+            push!(Main._os, O)
             x = if _iszero(t2)
                 t2
             elseif _isone(t2)
@@ -169,6 +170,16 @@ function laplace(O, x, s; simplify=false)
     end
 end
 
-laplace(::typeof(one), args::Tuple{<:Any}, ::Val{s}) where {s} = 1/s
-laplace(::typeof(+), args::NTuple{N,Any}, ::Val) where {N} = 1
-laplace(::typeof(*), args::NTuple{N,Any}, ::Val{s}) where {s,N} = 1
+import LaplaceRules
+for (modu, fun, arity) ∈ LaplaceRules.laplacerules()
+    fun in [:abs, :mod, :rem, :max, :min] && continue # special
+    for i ∈ 1:arity
+
+        expr = if arity == 1
+            LaplaceRules.laplacerule(modu, fun, :(args[1]))
+        else
+            LaplaceRules.laplacerule(modu, fun, ntuple(k->:(args[$k]), arity)...)[i]
+        end
+        @eval laplace(::typeof($modu.$fun), args::NTuple{$arity,Any}, ::Val{$i}) = $expr
+    end
+end
