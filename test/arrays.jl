@@ -6,6 +6,7 @@ using SymbolicUtils: Sym, term, operation
 
 @testset "arrays" begin
     @variables X[1:5, 1:5] Y[1:5, 1:5]
+    @test_throws BoundsError X[1000]
     @test typeof(X) <: Arr
     @test shape(X) == Slice.((1:5, 1:5))
     @test shape(Y) == Slice.((1:5, 1:5))
@@ -60,4 +61,10 @@ getdef(v) = getmetadata(v, Symbolics.VariableDefaultValue)
     D = Differential(t)
     @test isequal(collect(D.(x) ~ x), map(i->D(x[i]) ~ x[i], eachindex(x)))
     @test_throws ArgumentError A ~ t
+end
+
+@testset "Parent" begin
+    @variables t x[1:4](t)
+    x = unwrap(x)
+    @test Symbolics.getparent(collect(x)[1]).metadata === x.metadata
 end

@@ -46,7 +46,6 @@ Base.:^(D::Differential, n::Integer) = _repeat_apply(D, n)
 Base.show(io::IO, D::Differential) = print(io, "Differential(", D.x, ")")
 
 Base.:(==)(D1::Differential, D2::Differential) = isequal(D1.x, D2.x)
-Base.isequal(D1::Differential, D2::Differential) = isequal(D1.x, D2.x)
 Base.hash(D::Differential, u::UInt) = hash(D.x, xor(u, 0xdddddddddddddddd))
 
 _isfalse(occ::Bool) = occ === false
@@ -124,8 +123,8 @@ function expand_derivatives(O::Symbolic, simplify=false; occurances=nothing)
                 end
             end
         elseif isa(operation(arg), Integral)
-            if isa(operation(arg).domain, AbstractInterval)
-                domain = operation(arg).domain
+            if isa(operation(arg).domain.domain, AbstractInterval)
+                domain = operation(arg).domain.domain
                 a, b = DomainSets.endpoints(domain)
                 c = 0
                 inner_function = expand_derivatives(arguments(arg)[1])

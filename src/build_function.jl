@@ -81,12 +81,12 @@ end
 
 function destructure_arg(arg::Union{AbstractArray, Tuple}, inbounds, name)
     if !(arg isa Arr)
-        DestructuredArgs(map(value, arg), name, inbounds=inbounds)
+        DestructuredArgs(map(unwrap, arg), name, inbounds=inbounds)
     else
-        arg
+        unwrap(arg)
     end
 end
-destructure_arg(arg, _, _) = arg
+destructure_arg(arg, _, _) = unwrap(arg)
 
 function _build_function(target::JuliaTarget, op, args...;
                          conv = toexpr,
@@ -204,6 +204,7 @@ function _build_function(target::JuliaTarget, rhss::AbstractArray, args...;
                        expression = Val{true},
                        expression_module = @__MODULE__(),
                        checkbounds = false,
+                       postprocess_fbody=ex -> ex,
                        linenumbers = false,
                        outputidxs=nothing,
                        skipzeros = false,
@@ -215,14 +216,22 @@ function _build_function(target::JuliaTarget, rhss::AbstractArray, args...;
                                   Symbol("ˍ₋arg$(x[1])")), enumerate([args...]))
     i = findfirst(x->x isa DestructuredArgs, dargs)
     similarto = i === nothing ? Array : dargs[i].name
-    oop_expr = Func(dargs, [], make_array(parallel, dargs, rhss, similarto))
+    oop_expr = Func(dargs, [],
+                    postprocess_fbody(make_array(parallel, dargs, rhss, similarto)))
 
     if !isnothing(wrap_code[1])
         oop_expr = wrap_code[1](oop_expr)
     end
 
     out = Sym{Any}(:ˍ₋out)
-    ip_expr = Func([out, dargs...], [], set_array(parallel, dargs, out, outputidxs, rhss, checkbounds, skipzeros))
+    ip_expr = Func([out, dargs...], [],
+                   postprocess_fbody(set_array(parallel,
+                                               dargs,
+                                               out,
+                                               outputidxs,
+                                               rhss,
+                                               checkbounds,
+                                               skipzeros)))
 
     if !isnothing(wrap_code[2])
         ip_expr = wrap_code[2](ip_expr)
@@ -269,8 +278,9 @@ function toexpr(p::SpawnFetch{MultithreadedForm}, st)
                        ($(toexpr.(a, (st,))...),)))
         quote
             let
-                task = Base.Threads.Task($ex)
-                Base.Threads.schedule(task)
+                task = Base.Task($ex)
+                task.sticky = false
+                Base.schedule(task)
                 task
             end
         end

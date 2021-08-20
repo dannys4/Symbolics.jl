@@ -1,4 +1,4 @@
-using SymbolicUtils: FnType, Sym
+using SymbolicUtils: FnType, Sym, metadata
 using Setfield
 
 const IndexMap = Dict{Char,Char}(
@@ -16,19 +16,6 @@ const IndexMap = Dict{Char,Char}(
 
 struct VariableDefaultValue end
 struct VariableSource end
-
-getsource(x, val=nothing) = getmetadata(unwrap(x), VariableSource, val)
-
-const _fail = Dict()
-function getdefaultval(x, val=_fail)
-    x = unwrap(x)
-    if hasmetadata(x, VariableDefaultValue)
-        return getmetadata(x, VariableDefaultValue)
-    else
-        val === _fail && error("$x has no default value")
-        return val
-    end
-end
 
 function recurse_and_apply(f, x)
     if symtype(x) <: AbstractArray
@@ -60,13 +47,19 @@ end
 
 struct GetindexParent end
 
-function scalarize_getindex(x, parent=x)
+function scalarize_getindex(x, parent=Ref{Any}(x))
     if symtype(x) <: AbstractArray
-        getindex_posthook(x) do r,x,i...
+        parent[] = getindex_posthook(x) do r,x,i...
             scalarize_getindex(r, parent)
         end
     else
-        setmetadata(scalarize(x), GetindexParent, parent)
+        xx = scalarize(x)
+        xx = metadata(xx, metadata(x))
+        if symtype(xx) <: FnType
+            setmetadata(CallWithMetadata(xx, metadata(xx)), GetindexParent, parent[])
+        else
+            setmetadata(xx, GetindexParent, parent[])
+        end
     end
 end
 
@@ -76,17 +69,6 @@ function map_subscripts(indices)
     join(IndexMap[c] for c in str)
 end
 
-rename(x::Sym,name) = @set! x.name = name
-function rename(x::Symbolic, name)
-    if operation(x) isa Sym
-        @assert x isa Term
-        @set! x.f = rename(operation(x), name)
-        @set! x.hash = Ref{UInt}(0)
-        return x
-    else
-        error("can't rename $x to $name")
-    end
-end
 
 function unwrap_runtime_var(v)
     isruntime = Meta.isexpr(v, :$) && length(v.args) == 1
@@ -126,10 +108,11 @@ function _parse_vars(macroname, type, x, transform=identity)
             end
         end
 
+        type′ = type
 
         if Meta.isexpr(v, :(::))
             v, type′ = v.args
-            type = type′ === :Complex ? Complex{type} : type′
+            type′ = type′ === :Complex ? Complex{type} : type′
         end
 
 
@@ -148,9 +131,9 @@ function _parse_vars(macroname, type, x, transform=identity)
         if iscall
             isruntime, fname = unwrap_runtime_var(v.args[1])
             call_args = map(last∘unwrap_runtime_var, @view v.args[2:end])
-            var_name, expr = construct_vars(macroname, fname, type, call_args, val, options, transform, isruntime)
+            var_name, expr = construct_vars(macroname, fname, type′, call_args, val, options, transform, isruntime)
         else
-            var_name, expr = construct_vars(macroname, v, type, nothing, val, options, transform, isruntime)
+            var_name, expr = construct_vars(macroname, v, type′, nothing, val, options, transform, isruntime)
         end
 
         push!(var_names, var_name)
@@ -207,13 +190,36 @@ function setprops_expr(expr, props, macroname, varname)
                               $(option_to_metadata_type(Val{lhs}())),
                        $rhs))
     end
+    expr
+end
+
+struct CallWithMetadata{T,M} <: Symbolic{T}
+    f::Symbolic{T}
+    metadata::M
+end
+
+for f in [:istree, :operation, :arguments]
+    @eval SymbolicUtils.$f(x::CallWithMetadata) = $f(x.f)
+end
+
+SymbolicUtils.Code.toexpr(x::CallWithMetadata, st) = SymbolicUtils.Code.toexpr(x.f, st)
+
+CallWithMetadata(f) = CallWithMetadata(f, nothing)
+
+function Base.show(io::IO, c::CallWithMetadata)
+    show(io, c.f)
+    print(io, "⋆")
+end
+
+function (f::CallWithMetadata)(args...)
+    wrap(metadata(f.f(args...), metadata(f)))
 end
 
 function construct_var(macroname, var_name, type, call_args, val, prop)
     expr = if call_args === nothing
         :($Sym{$type}($var_name))
     elseif !isempty(call_args) && call_args[end] == :..
-        :($Sym{$FnType{Tuple, $type}}($var_name)) # XXX: using Num as output
+        :($CallWithMetadata($Sym{$FnType{Tuple, $type}}($var_name)))
     else
         :($Sym{$FnType{NTuple{$(length(call_args)), Any}, $type}}($var_name)($(map(x->:($value($x)), call_args)...)))
     end
@@ -235,27 +241,34 @@ function _construct_array_vars(macroname, var_name, type, call_args, val, prop, 
     # TODO: just use Sym here
     ndim = length(indices)
 
+    need_scalarize = false
     expr = if call_args === nothing
         ex = :($Sym{Array{$type, $ndim}}($var_name))
         :($setmetadata($ex, $ArrayShapeCtx, ($(indices...),)))
     elseif !isempty(call_args) && call_args[end] == :..
-        ex = :($Sym{Array{$FnType{Tuple, $type}, $ndim}}($var_name)) # XXX: using Num as output
-        :($setmetadata($ex, $ArrayShapeCtx, ($(indices...),)))
-    else
-        # [(R -> R)(R) ....]
+        need_scalarize = true
         ex = :($Sym{Array{$FnType{Tuple, $type}, $ndim}}($var_name))
         ex = :($setmetadata($ex, $ArrayShapeCtx, ($(indices...),)))
-        :($scalarize_getindex($map($CallWith(($(call_args...),)), $ex)))
-
+        :($map($CallWithMetadata, $ex))
+    else
+        # [(R -> R)(R) ....]
+        need_scalarize = true
+        ex = :($Sym{Array{$FnType{Tuple, $type}, $ndim}}($var_name))
+        ex = :($setmetadata($ex, $ArrayShapeCtx, ($(indices...),)))
+        :($map($CallWith(($(call_args...),)), $ex))
     end
 
     if val !== nothing
         expr = :($setdefaultval($expr, $val))
     end
-
     expr = setprops_expr(expr, prop, macroname, var_name)
+    if need_scalarize
+        expr = :($scalarize_getindex($expr))
+    end
 
-    return :($wrap($expr))
+    expr = :($wrap($expr))
+
+    return expr
 end
 
 
@@ -333,21 +346,45 @@ function TreeViews.treelabel(io::IO,x::Sym,
   show(io,mime,Text(x.name))
 end
 
-function getname end
+const _fail = Dict()
 
-struct Namespace{T} <: Symbolic{T}
-    parent::Any
-    named::Symbolic{T}
+_getname(x, _) = nameof(x)
+_getname(x::Symbol, _) = x
+function _getname(x::Symbolic, val)
+    ss = getsource(x, nothing)
+    if ss === nothing
+        ss = getsource(getparent(x), val)
+    end
+    ss === _fail && throw(ArgumentError("Variable $x doesn't have a source defined."))
+    ss[2]
 end
 
-SymbolicUtils.metadata(ns::Namespace) = SymbolicUtils.metadata(ns.named)
-getname(x) = _getname(unwrap(x))
-_getname(x) = nameof(x)
-_getname(x::Symbol) = x
-_getname(x::Symbolic) = getsource(x)[2]
-getname(x::Namespace) = Symbol(getname(x.parent), :(.), getname(x.named))
-Base.show(io::IO, x::Namespace) = print(io, getname(x))
-Base.isequal(x::Namespace, y::Namespace) = isequal(x.parent, y.parent) && isequal(x.named, y.named)
+getsource(x, val=_fail) = getmetadata(unwrap(x), VariableSource, val)
+
+getname(x, val=_fail) = _getname(unwrap(x), val)
+
+function getparent(x, val=_fail)
+    maybe_parent = getmetadata(x, Symbolics.GetindexParent, nothing)
+    if maybe_parent !== nothing
+        return maybe_parent
+    else
+        if istree(x) && operation(x) === getindex
+            return arguments(x)[1]
+        end
+    end
+    val === _fail && throw(ArgumentError("Cannot find the parent of $x."))
+    return val
+end
+
+function getdefaultval(x, val=_fail)
+    x = unwrap(x)
+    val = getmetadata(x, VariableDefaultValue, val)
+    if val !== _fail
+        return val
+    else
+        error("$x has no default value")
+    end
+end
 
 """
     variables(name::Symbol, indices...)
@@ -370,24 +407,94 @@ function variables(name, indices...; T=Real)
 end
 
 """
-    variable(name::Symbol, idx::Integer...)
+    variable(name::Symbol, idx::Integer...; T=Real)
 
-Create a variable with the given name along with subscripted indices.
+Create a variable with the given name along with subscripted indices with the
+`symtype=T`. When `T=FnType`, it creates a symbolic function.
 
 ```julia-repl
-julia> Symbolics.variable(:x, 5,2,0)
+julia> Symbolics.variable(:x, 4, 2, 0)
 x₄ˏ₂ˏ₀
+
+julia> Symbolics.variable(:x, 4, 2, 0, T=Symbolics.FnType)
+x₄ˏ₂ˏ₀⋆
 ```
 
 Also see `variables`.
 """
 function variable(name, idx...; T=Real)
     name_ij = Symbol(name, join(map_subscripts.(idx), "ˏ"))
-    first(@variables $name_ij::T)
+    if T <: FnType
+        first(@variables $name_ij(..))
+    else
+        first(@variables $name_ij::T)
+    end
 end
 
+##### Renaming #####
+# getname
+# rename
+# getindex parent
+# calls
+# symbolic function x[1:3](..)
+#
+# x_t
+# sys.x
 
-# BS deprecation below
+function rename_getindex_source(x, parent=x)
+    getindex_posthook(x) do r,x,i...
+        hasmetadata(r, GetindexParent) ? setmetadata(r, GetindexParent, parent) : r
+    end
+end
+
+function rename_metadata(from, to, name)
+    if hasmetadata(from, VariableSource)
+        s = getmetadata(from, VariableSource)
+        to = setmetadata(to, VariableSource, (s[1], name))
+    end
+    if hasmetadata(from, GetindexParent)
+        s = getmetadata(from, GetindexParent)
+        to = setmetadata(to, GetindexParent, rename(s, name))
+    end
+    return to
+end
+
+function rename(x::Sym, name)
+    xx = @set! x.name = name
+    xx = rename_metadata(x, xx, name)
+    symtype(xx) <: AbstractArray ? rename_getindex_source(xx) : xx
+end
+
+rename(x::Union{Num, Arr}, name) = wrap(rename(unwrap(x), name))
+function rename(x::ArrayOp, name)
+    t = x.term
+    args = arguments(t)
+    # Hack:
+    @assert operation(t) === (map) && (args[1] isa CallWith || args[1] == CallWithMetadata)
+    rn = rename(args[2], name)
+
+    xx = metadata(operation(t)(args[1], rn), metadata(x))
+    rename_getindex_source(rename_metadata(x, xx, name))
+end
+
+function rename(x::CallWithMetadata, name)
+    rename_metadata(x, CallWithMetadata(rename(x.f, name), x.metadata), name)
+end
+
+function rename(x::Symbolic, name)
+    if istree(x) && operation(x) === getindex
+        rename(arguments(x)[1], name)[arguments(x)[2:end]...]
+    elseif istree(x) && symtype(operation(x)) <: FnType || operation(x) isa CallWithMetadata
+        @assert x isa Term
+        xx = @set x.f = rename(operation(x), name)
+        @set! xx.hash = Ref{UInt}(0)
+        return rename_metadata(x, xx, name)
+    else
+        error("can't rename $x to $name")
+    end
+end
+
+# Deprecation below
 
 struct Variable{T} end
 
